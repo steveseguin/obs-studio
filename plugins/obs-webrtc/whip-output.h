@@ -1,3 +1,4 @@
+/////////// GOOD
 #pragma once
 
 #include <obs-module.h>
@@ -48,7 +49,12 @@ private:
 	std::string endpoint_url;
 	std::string bearer_token;
 	std::string resource_url;
-	std::string resource_location;
+	
+	std::string trickle_endpoint;
+	std::mutex candidate_mutex;
+	void OnIceCandidate(const std::string &candidate, const std::string &mid);
+	bool SendTrickleCandidate(const std::string &candidate);
+	std::vector<std::string> pending_candidates;
 
 	std::atomic<bool> running;
 
