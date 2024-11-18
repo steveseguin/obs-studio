@@ -1,4 +1,4 @@
-// My new broke code.
+// GOOOOOOOOOOOOOOOD
 #include "whip-output.h"
 #include "whip-utils.h"
 
@@ -247,7 +247,7 @@ bool WHIPOutput::Setup()
 	}
 	
 	peer_connection = std::make_shared<rtc::PeerConnection>(cfg);
-
+	
 	peer_connection->onStateChange([this](rtc::PeerConnection::State state) {
 		switch (state) {
 		case rtc::PeerConnection::State::New:
@@ -316,13 +316,11 @@ bool WHIPOutput::Setup()
 	});
 
 	peer_connection->onLocalCandidate([this](rtc::Candidate candidate) {
-		std::string typeStr;
-		switch(candidate.type()) {
-			case rtc::Candidate::Type::Host: typeStr = "host"; break;
-			case rtc::Candidate::Type::ServerReflexive: typeStr = "srflx"; break;
-			case rtc::Candidate::Type::PeerReflexive: typeStr = "prflx"; break;
-			case rtc::Candidate::Type::Relayed: typeStr = "relay"; break;
-			default: typeStr = "unknown";
+		do_log(LOG_INFO, "Got ICE candidate: %s", candidate.candidate().c_str());
+		if (trickle_endpoint.empty()) {
+			pending_candidates.push_back(candidate.candidate());
+		} else {
+			SendTrickleCandidate(candidate.candidate());
 		}
 	});
 
@@ -404,9 +402,32 @@ void WHIPOutput::ParseLinkHeader(std::string val, std::vector<rtc::IceServer> &i
 
 		if (part.find("<") != std::string::npos || part.find("http") != std::string::npos) {
 			url = extractUrl(part);
+			do_log(LOG_INFO, "Found URL in Link header: %s", url.c_str());
 		} else if (part.find("rel=") != std::string::npos) {
 			auto rel = extractValue(part);
-			foundRel = is_ice_server_link(rel);
+			if (rel == "trickle-ice") {
+				if (url[0] == '/') {
+					// Use the base URL from resource_url
+					size_t pos = resource_url.find("://");
+					if (pos != std::string::npos) {
+						pos = resource_url.find("/", pos + 3);
+						if (pos != std::string::npos) {
+							trickle_endpoint = resource_url.substr(0, pos) + url;
+						}
+					}
+				} else if (url.find("http") != 0) {
+					trickle_endpoint = resource_url.substr(0, resource_url.find_last_of('/') + 1) + url;
+				} else {
+					trickle_endpoint = url;
+				}
+				do_log(LOG_INFO, "Setting trickle endpoint: %s", trickle_endpoint.c_str());
+	
+				// Send any pending candidates
+				for (const auto& candidate : pending_candidates) {
+					SendTrickleCandidate(candidate);
+				}
+				pending_candidates.clear();
+			}
 		} else if (part.find("username=") != std::string::npos) {
 			username = extractValue(part);
 			hasCredentials = true;
@@ -446,8 +467,58 @@ void WHIPOutput::ParseLinkHeader(std::string val, std::vector<rtc::IceServer> &i
 	}
 }
 
-bool WHIPOutput::Connect()
-{
+void WHIPOutput::OnIceCandidate(const std::string &candidate, const std::string &mid) {
+	if (!running)
+		return;
+		
+	do_log(LOG_INFO, "Got ICE candidate: %s", candidate.c_str());
+	
+	if (trickle_endpoint.empty()) {
+		do_log(LOG_WARNING, "No trickle endpoint available");
+		return;
+	}
+	
+	SendTrickleCandidate(candidate);
+}
+
+bool WHIPOutput::SendTrickleCandidate(const std::string &candidate) {
+	if (trickle_endpoint.empty()) {
+		do_log(LOG_DEBUG, "No trickle endpoint available");
+		return false;
+	}
+		
+	std::stringstream sdp;
+	sdp << "a=" << candidate << "\r\n";
+	
+	CURL *curl = curl_easy_init();
+	if (!curl) {
+		do_log(LOG_WARNING, "Failed to initialize CURL for trickle candidate");
+		return false;
+	}
+	
+	struct curl_slist *headers = nullptr;
+	if (!bearer_token.empty()) {
+		std::string auth = "Authorization: Bearer " + bearer_token;
+		headers = curl_slist_append(headers, auth.c_str());
+	}
+	
+	headers = curl_slist_append(headers, "Content-Type: application/trickle-ice-sdpfrag");
+	
+	curl_easy_setopt(curl, CURLOPT_URL, trickle_endpoint.c_str());
+	curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PATCH");
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, sdp.str().c_str());
+	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+	
+	CURLcode res = curl_easy_perform(curl);
+	
+	curl_slist_free_all(headers);
+	curl_easy_cleanup(curl);
+	
+	return res == CURLE_OK;
+}
+
+bool WHIPOutput::Connect() {
 	std::vector<rtc::IceServer> iceServers;
 	std::string read_buffer;
 	std::vector<std::string> http_headers;
@@ -467,10 +538,8 @@ bool WHIPOutput::Connect()
 	
 	std::string initial_offer_sdp = std::string(*peer_connection->localDescription());
 	
-	// Set up CURL headers with RAII cleanup
 	struct curl_slist *headers = NULL;
 	headers = curl_slist_append(headers, "Content-Type: application/sdp");
-	// Add Accept header as per spec
 	headers = curl_slist_append(headers, "Accept: application/sdp");
 	
 	if (!bearer_token.empty()) {
@@ -480,12 +549,9 @@ bool WHIPOutput::Connect()
 	headers = curl_slist_append(headers, user_agent.c_str());
 
 	auto cleanup_headers = [headers]() {
-		if (headers) {
-			curl_slist_free_all(headers);
-		}
+		if (headers) curl_slist_free_all(headers);
 	};
 
-	// Set up CURL with RAII
 	std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
 	if (!curl) {
 		do_log(LOG_INFO, "Failed to initialize CURL");
@@ -494,7 +560,6 @@ bool WHIPOutput::Connect()
 	}
 
 	char error_buffer[CURL_ERROR_SIZE] = {};
-	// Configure CURL
 	curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, curl_writefunction);
 	curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, (void *)&read_buffer);
 	curl_easy_setopt(curl.get(), CURLOPT_HEADERFUNCTION, curl_header_function);
@@ -516,9 +581,11 @@ bool WHIPOutput::Connect()
 		return false;
 	}
 
-	// Get response info
 	long response_code;
+	char* effective_url = nullptr;
 	curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &response_code);
+	curl_easy_getinfo(curl.get(), CURLINFO_EFFECTIVE_URL, &effective_url);
+
 	if (!(response_code == 200 || response_code == 201)) {
 		do_log(LOG_INFO, "Connect failed: HTTP endpoint returned response code %ld", response_code);
 		cleanup_headers();
@@ -526,93 +593,43 @@ bool WHIPOutput::Connect()
 		return false;
 	}
 
-	// Get response info
-	long redirect_count = 0;
-	char* effective_url = nullptr;
-	curl_easy_getinfo(curl.get(), CURLINFO_REDIRECT_COUNT, &redirect_count);
-	curl_easy_getinfo(curl.get(), CURLINFO_EFFECTIVE_URL, &effective_url);
-
-	// Handle Location header and relative URLs
-	std::string last_location_header;
-	size_t location_header_count = 0;
-	bool has_link_header = false;
-
+	// Set resource URL first
 	for (const auto &http_header : http_headers) {
-		// Check for Location header
 		auto location = value_for_header("location", http_header);
 		if (!location.empty()) {
-			location_header_count++;
-			last_location_header = location;
+			CURLU *url_builder = curl_url();
+			if (location.find("http") != 0 && effective_url) {
+				curl_url_set(url_builder, CURLUPART_URL, effective_url, 0);
+				curl_url_set(url_builder, CURLUPART_PATH, location.c_str(), 0);
+			} else {
+				curl_url_set(url_builder, CURLUPART_URL, location.c_str(), 0);
+			}
+			
+			char *url = nullptr;
+			CURLUcode rc = curl_url_get(url_builder, CURLUPART_URL, &url, 0);
+			if (rc == CURLUE_OK) {
+				resource_url = url;
+				curl_free(url);
+			}
+			curl_url_cleanup(url_builder);
+			do_log(LOG_INFO, "WHIP Resource URL is: %s", resource_url.c_str());
+			break;
 		}
+	}
 
-		// Parse Link headers
+	// Now process Link headers
+	for (const auto &http_header : http_headers) {
 		std::string link_value = value_for_header("link", http_header);
 		if (!link_value.empty()) {
-			has_link_header = true;
-			link_value.erase(0, link_value.find_first_not_of(" \t\r\n"));
-			link_value.erase(link_value.find_last_not_of(" \t\r\n") + 1);
-
-			if (!link_value.empty()) {
-				size_t start = 0;
-				while (true) {
-					size_t end = link_value.find(',', start);
-					std::string single_link = link_value.substr(start, (end == std::string::npos) ? end : end - start);
-					
-					single_link.erase(0, single_link.find_first_not_of(" \t\r\n"));
-					single_link.erase(single_link.find_last_not_of(" \t\r\n") + 1);
-					
-					if (!single_link.empty()) {
-						ParseLinkHeader(single_link, iceServers);
-					}
-					
-					if (end == std::string::npos) break;
-					start = end + 1;
-				}
-			}
+			ParseLinkHeader(link_value, iceServers);
 		}
 	}
 
-	if (location_header_count < static_cast<size_t>(redirect_count) + 1) {
-		do_log(LOG_WARNING, "WHIP server did not provide a resource URL via the Location header");
-	}
-
-	// Handle relative Location URLs
-	CURLU *url_builder = curl_url();
-	if (last_location_header.find("http") != 0 && effective_url) {
-		curl_url_set(url_builder, CURLUPART_URL, effective_url, 0);
-		curl_url_set(url_builder, CURLUPART_PATH, last_location_header.c_str(), 0);
-		curl_url_set(url_builder, CURLUPART_QUERY, "", 0);
-	} else {
-		curl_url_set(url_builder, CURLUPART_URL, last_location_header.c_str(), 0);
-	}
-
-	char *url = nullptr;
-	CURLUcode rc = curl_url_get(url_builder, CURLUPART_URL, &url, CURLU_NO_DEFAULT_PORT);
-	if (rc) {
-		do_log(LOG_INFO, "WHIP server provided an invalid resource URL via the Location header");
-		cleanup_headers();
-		curl_url_cleanup(url_builder);
-		obs_output_signal_stop(output, OBS_OUTPUT_CONNECT_FAILED);
-		return false;
-	}
-
-	resource_url = url;
-	curl_free(url);
-	curl_url_cleanup(url_builder);
-	do_log(LOG_INFO, "WHIP Resource URL is: %s", resource_url.c_str());
-
-	if (has_link_header) {
-		// Log the ICE servers we received but can't use
-		do_log(LOG_INFO, "Received %zu ICE servers from WHIP endpoint", iceServers.size());
-		do_log(LOG_WARNING, "Dynamic ICE server configuration not supported - using initial configuration");
-	}
-
+	// Process response SDP
 	try {
 		auto response_str = std::string(read_buffer);
 		size_t sdp_start = response_str.find("v=0");
 		if (sdp_start == std::string::npos) {
-			// Some endpoints might include whitespace or other content before the SDP
-			// Try to find any line starting with a common SDP field
 			static const std::vector<std::string> sdp_fields = {"v=", "o=", "s=", "m="};
 			for (const auto& field : sdp_fields) {
 				sdp_start = response_str.find(field);
@@ -624,23 +641,6 @@ bool WHIPOutput::Connect()
 		do_log(LOG_INFO, "Received SDP answer: %s", response_str.c_str());
 		
 		rtc::Description answer(response_str, "answer");
-		
-		// Log candidates we can see
-		for (const auto& candidate : answer.candidates()) {
-			std::string typeStr;
-			switch(candidate.type()) {
-				case rtc::Candidate::Type::Host: typeStr = "host"; break;
-				case rtc::Candidate::Type::ServerReflexive: typeStr = "srflx"; break;
-				case rtc::Candidate::Type::PeerReflexive: typeStr = "prflx"; break;
-				case rtc::Candidate::Type::Relayed: typeStr = "relay"; break;
-				default: typeStr = "unknown";
-			}
-			
-			do_log(LOG_INFO, "Remote candidate: type=%s port=%d", 
-				typeStr.c_str(),
-				candidate.port());
-		}
-
 		peer_connection->setRemoteDescription(answer);
 		return true;
 	} catch (const std::exception &err) {
