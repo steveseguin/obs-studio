@@ -832,6 +832,17 @@ void WHIPOutput::Send(void *data, uintptr_t size, uint64_t duration,
 		}
 		return;
 	}
+	
+	auto rtp_config = rtcp_sr_reporter->rtpConfig;
+
+	// Sample time is in microseconds, we need to convert it to seconds
+	auto elapsed_seconds = double(duration) / (1000.0 * 1000.0);
+
+	// Get elapsed time in clock rate
+	uint32_t elapsed_timestamp = rtp_config->secondsToTimestamp(elapsed_seconds);
+
+	// Set new timestamp
+	rtp_config->timestamp = rtp_config->timestamp + elapsed_timestamp;
 
 	// Get elapsed time in clock rate from last RTCP sender report
 	auto report_elapsed_timestamp = rtp_config->timestamp - rtcp_sr_reporter->lastReportedTimestamp();
