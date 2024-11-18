@@ -37,8 +37,8 @@ private:
 	void StopThread(bool signal);
 	void ParseLinkHeader(std::string linkHeader, std::vector<rtc::IceServer> &iceServers);
 	void TransferCallbacks(std::shared_ptr<rtc::PeerConnection> newConnection);
-    void TransferAudioTrack(std::shared_ptr<rtc::PeerConnection> newConnection);
-    void TransferVideoTrack(std::shared_ptr<rtc::PeerConnection> newConnection);
+	void TransferAudioTrack(std::shared_ptr<rtc::PeerConnection> newConnection);
+	void TransferVideoTrack(std::shared_ptr<rtc::PeerConnection> newConnection);
 	std::string publishUrl;
 	void Send(void *data, uintptr_t size, uint64_t duration, std::shared_ptr<rtc::Track> track,
 		  std::shared_ptr<rtc::RtcpSrReporter> rtcp_sr_reporter);
