@@ -10,8 +10,8 @@ static uint16_t MAX_VIDEO_FRAGMENT_SIZE = 1200;
 
 const int signaling_media_id_length = 16;
 const char signaling_media_id_valid_char[] = "0123456789"
-					     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-					     "abcdefghijklmnopqrstuvwxyz";
+						 "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+						 "abcdefghijklmnopqrstuvwxyz";
 
 const std::string user_agent = generate_user_agent();
 
@@ -100,7 +100,7 @@ void WHIPOutput::Data(struct encoder_packet *packet)
 void WHIPOutput::ConfigureAudioTrack(std::string media_stream_id, std::string cname)
 {
 	if (!obs_output_get_audio_encoder(output, 0)) {
-		do_log(LOG_DEBUG, "Not configuring audio track: Audio encoder not assigned");
+		do_log(LOG_INFO, "Not configuring audio track: Audio encoder not assigned");
 		return;
 	}
 
@@ -127,7 +127,7 @@ void WHIPOutput::ConfigureAudioTrack(std::string media_stream_id, std::string cn
 void WHIPOutput::ConfigureVideoTrack(std::string media_stream_id, std::string cname)
 {
 	if (!obs_output_get_video_encoder(output)) {
-		do_log(LOG_DEBUG, "Not configuring video track: Video encoder not assigned");
+		do_log(LOG_INFO, "Not configuring video track: Video encoder not assigned");
 		return;
 	}
 
@@ -207,14 +207,333 @@ bool WHIPOutput::Init()
 bool WHIPOutput::Setup()
 {
 	rtc::Configuration cfg;
-
-#if RTC_VERSION_MAJOR == 0 && RTC_VERSION_MINOR > 20 || RTC_VERSION_MAJOR > 1
-	cfg.disableAutoGathering = true;
-#endif
+	
+	// Add default STUN servers
+	cfg.iceServers = {
+		rtc::IceServer("stun:stun.l.google.com:19302"),
+		rtc::IceServer("stun:stun1.l.google.com:19302")
+	};
 
 	peer_connection = std::make_shared<rtc::PeerConnection>(cfg);
 
 	peer_connection->onStateChange([this](rtc::PeerConnection::State state) {
+		switch (state) {
+		case rtc::PeerConnection::State::New:
+			do_log(LOG_INFO, "PeerConnection state: New");
+			break;
+		case rtc::PeerConnection::State::Connecting:
+			do_log(LOG_INFO, "PeerConnection state: Connecting");
+			start_time_ns = os_gettime_ns();
+			break;
+		case rtc::PeerConnection::State::Connected:
+			do_log(LOG_INFO, "PeerConnection state: Connected");
+			connect_time_ms = (int)((os_gettime_ns() - start_time_ns) / 1000000.0);
+			do_log(LOG_INFO, "Connect time: %dms", connect_time_ms.load());
+			break;
+		case rtc::PeerConnection::State::Disconnected:
+			do_log(LOG_INFO, "PeerConnection state: Disconnected");
+			Stop(false);
+			obs_output_signal_stop(output, OBS_OUTPUT_DISCONNECTED);
+			break;
+		case rtc::PeerConnection::State::Failed:
+			do_log(LOG_INFO, "PeerConnection state: Failed");
+			Stop(false);
+			obs_output_signal_stop(output, OBS_OUTPUT_ERROR);
+			break;
+		case rtc::PeerConnection::State::Closed:
+			do_log(LOG_INFO, "PeerConnection state: Closed");
+			break;
+		}
+	});
+
+	peer_connection->onGatheringStateChange([this](rtc::PeerConnection::GatheringState state) {
+		switch (state) {
+		case rtc::PeerConnection::GatheringState::New:
+			do_log(LOG_INFO, "ICE gathering state: New");
+			break;
+		case rtc::PeerConnection::GatheringState::InProgress:
+			do_log(LOG_INFO, "ICE gathering state: In Progress");
+			break;
+		case rtc::PeerConnection::GatheringState::Complete:
+			do_log(LOG_INFO, "ICE gathering state: Complete");
+			break;
+		}
+	});
+
+	peer_connection->onIceStateChange([this](rtc::PeerConnection::IceState state) {
+		switch (state) {
+		case rtc::PeerConnection::IceState::New:
+			do_log(LOG_INFO, "ICE state: New");
+			break;
+		case rtc::PeerConnection::IceState::Checking:
+			do_log(LOG_INFO, "ICE state: Checking");
+			break;
+		case rtc::PeerConnection::IceState::Connected:
+			do_log(LOG_INFO, "ICE state: Connected");
+			break;
+		case rtc::PeerConnection::IceState::Failed:
+			do_log(LOG_ERROR, "ICE state: Failed");
+			break;
+		case rtc::PeerConnection::IceState::Disconnected:
+			do_log(LOG_INFO, "ICE state: Disconnected");
+			break;
+		case rtc::PeerConnection::IceState::Closed:
+			do_log(LOG_INFO, "ICE state: Closed");
+			break;
+		}
+	});
+
+	peer_connection->onLocalCandidate([this](rtc::Candidate candidate) {
+		std::string typeStr;
+		switch(candidate.type()) {
+			case rtc::Candidate::Type::Host: typeStr = "host"; break;
+			case rtc::Candidate::Type::ServerReflexive: typeStr = "srflx"; break;
+			case rtc::Candidate::Type::PeerReflexive: typeStr = "prflx"; break;
+			case rtc::Candidate::Type::Relayed: typeStr = "relay"; break;
+			default: typeStr = "unknown";
+		}
+		
+		do_log(LOG_DEBUG, "Local ICE candidate: type=%s address=%s port=%d mid=%s",
+			   typeStr.c_str(),
+			   candidate.address().value_or("unknown").c_str(),
+			   candidate.port(),
+			   candidate.mid().c_str());
+	});
+
+	std::string media_stream_id, cname;
+	media_stream_id.reserve(signaling_media_id_length);
+	cname.reserve(signaling_media_id_length);
+
+	for (int i = 0; i < signaling_media_id_length; ++i) {
+		media_stream_id += signaling_media_id_valid_char[rand() % (sizeof(signaling_media_id_valid_char) - 1)];
+
+		cname += signaling_media_id_valid_char[rand() % (sizeof(signaling_media_id_valid_char) - 1)];
+	}
+
+	ConfigureAudioTrack(media_stream_id, cname);
+	ConfigureVideoTrack(media_stream_id, cname);
+
+	peer_connection->setLocalDescription();
+
+	return true;
+}
+
+// Given a Link header extract URL/Username/Credential and create rtc::IceServer
+// <turn:turn.example.net>; username="user"; credential="myPassword";
+//
+// https://www.ietf.org/archive/id/draft-ietf-wish-whip-13.html#section-4.4
+void WHIPOutput::ParseLinkHeader(std::string val, std::vector<rtc::IceServer> &iceServers)
+{
+	std::string url, username, password;
+	bool hasCredentialType = false;
+
+	auto extractUrl = [](std::string input) -> std::string {
+		auto head = input.find("<") + 1;
+		auto tail = input.find(">");
+
+		if (head == std::string::npos || tail == std::string::npos) {
+			return "";
+		}
+		return input.substr(head, tail - head);
+	};
+
+	auto extractValue = [](std::string input) -> std::string {
+		auto head = input.find("\"") + 1;
+		auto tail = input.find_last_of("\"");
+
+		if (head == std::string::npos || tail == std::string::npos) {
+			return "";
+		}
+		return input.substr(head, tail - head);
+	};
+
+	// Split the Link header value into parts
+	std::istringstream stream(val);
+	std::string part;
+	while (std::getline(stream, part, ';')) {
+		// Trim whitespace
+		part.erase(0, part.find_first_not_of(" \t\r\n"));
+		part.erase(part.find_last_not_of(" \t\r\n") + 1);
+
+		if (part.empty()) {
+			continue;
+		}
+
+		if (part.find("<") == 0) {
+			url = extractUrl(part);
+		} else if (part.find("username=") != std::string::npos) {
+			username = extractValue(part);
+		} else if (part.find("credential=") != std::string::npos) {
+			password = extractValue(part);
+		} else if (part.find("credential-type=") != std::string::npos) {
+			auto type = extractValue(part);
+			hasCredentialType = (type == "password");
+		}
+	}
+
+	// Only create server if we have a valid URL
+	if (!url.empty()) {
+		try {
+			auto server = rtc::IceServer(url);
+			if (!username.empty() && !password.empty() && hasCredentialType) {
+				server.username = username;
+				server.password = password;
+			}
+			iceServers.push_back(server);
+		} catch (const std::invalid_argument &err) {
+			do_log(LOG_WARNING, "Failed to parse ICE server from %s: %s", val.c_str(), err.what());
+		}
+	}
+}
+
+bool WHIPOutput::Connect() {
+	std::vector<rtc::IceServer> iceServers;
+	std::string read_buffer;
+	std::vector<std::string> http_headers;
+	
+	if (!peer_connection || !peer_connection->localDescription()) {
+		do_log(LOG_ERROR, "No peer connection or local description available");
+		return false;
+	}
+
+	// Wait for ICE gathering to complete
+	int gather_timeout = 0;
+	while (peer_connection->gatheringState() != rtc::PeerConnection::GatheringState::Complete && 
+		   gather_timeout < 50) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		gather_timeout++;
+	}
+	
+	std::string initial_offer_sdp = std::string(*peer_connection->localDescription());
+	
+	// Set up CURL headers
+	struct curl_slist *headers = NULL;
+	headers = curl_slist_append(headers, "Content-Type: application/sdp");
+	if (!bearer_token.empty()) {
+		auto bearer_token_header = std::string("Authorization: Bearer ") + bearer_token;
+		headers = curl_slist_append(headers, bearer_token_header.c_str());
+	}
+	headers = curl_slist_append(headers, user_agent.c_str());
+
+	auto cleanup_headers = [headers]() {
+		if (headers) {
+			curl_slist_free_all(headers);
+		}
+	};
+
+	// Set up CURL with RAII
+	std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
+	if (!curl) {
+		do_log(LOG_ERROR, "Failed to initialize CURL");
+		cleanup_headers();
+		return false;
+	}
+
+	char error_buffer[CURL_ERROR_SIZE] = {};
+
+	// Configure CURL
+	curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, curl_writefunction);
+	curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, (void *)&read_buffer);
+	curl_easy_setopt(curl.get(), CURLOPT_HEADERFUNCTION, curl_header_function);
+	curl_easy_setopt(curl.get(), CURLOPT_HEADERDATA, (void *)&http_headers);
+	curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, headers);
+	curl_easy_setopt(curl.get(), CURLOPT_URL, endpoint_url.c_str());
+	curl_easy_setopt(curl.get(), CURLOPT_POST, 1L);
+	curl_easy_setopt(curl.get(), CURLOPT_COPYPOSTFIELDS, initial_offer_sdp.c_str());
+	curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, 8L);
+	curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 1L);
+	curl_easy_setopt(curl.get(), CURLOPT_UNRESTRICTED_AUTH, 1L);
+	curl_easy_setopt(curl.get(), CURLOPT_ERRORBUFFER, error_buffer);
+
+	CURLcode res = curl_easy_perform(curl.get());
+	if (res != CURLE_OK) {
+		do_log(LOG_ERROR, "Connect failed: %s", error_buffer[0] ? error_buffer : curl_easy_strerror(res));
+		cleanup_headers();
+		obs_output_signal_stop(output, OBS_OUTPUT_CONNECT_FAILED);
+		return false;
+	}
+
+	// Get response info
+	long redirect_count = 0;
+	char* effective_url = nullptr;
+	curl_easy_getinfo(curl.get(), CURLINFO_REDIRECT_COUNT, &redirect_count);
+	curl_easy_getinfo(curl.get(), CURLINFO_EFFECTIVE_URL, &effective_url);
+
+	// Parse all headers
+	size_t location_header_count = 0;
+	for (const auto &http_header : http_headers) {
+		// Handle Location headers
+		std::string location_value = value_for_header("location", http_header);
+		if (!location_value.empty()) {
+			location_value.erase(0, location_value.find_first_not_of(" \t\r\n"));
+			location_value.erase(location_value.find_last_not_of(" \t\r\n") + 1);
+			if (!location_value.empty()) {
+				location_header_count++;
+				resource_location = std::move(location_value);
+			}
+		}
+
+		// Handle Link headers for ICE servers
+		std::string link_value = value_for_header("link", http_header);
+		if (!link_value.empty()) {
+			link_value.erase(0, link_value.find_first_not_of(" \t\r\n"));
+			link_value.erase(link_value.find_last_not_of(" \t\r\n") + 1);
+
+			if (!link_value.empty()) {
+				size_t start = 0;
+				while (true) {
+					size_t end = link_value.find(',', start);
+					std::string single_link = link_value.substr(start, (end == std::string::npos) ? end : end - start);
+					
+					single_link.erase(0, single_link.find_first_not_of(" \t\r\n"));
+					single_link.erase(single_link.find_last_not_of(" \t\r\n") + 1);
+					
+					if (!single_link.empty()) {
+						ParseLinkHeader(single_link, iceServers);  // Fixed: use single_link
+					}
+					
+					if (end == std::string::npos) break;
+					start = end + 1;
+				}
+			}
+		}
+	}
+	
+	std::shared_ptr<rtc::PeerConnection> newConnection;
+	if (!iceServers.empty()) {
+		rtc::Configuration new_config;
+		new_config.iceServers = {
+			rtc::IceServer("stun:stun.l.google.com:19302"),
+			rtc::IceServer("stun:stun1.l.google.com:19302")
+		};
+		
+		new_config.iceServers.insert(
+			new_config.iceServers.end(),
+			iceServers.begin(),
+			iceServers.end()
+		);
+
+		try {
+			// Set remote description on existing connection first
+			auto response_str = std::string(read_buffer);
+			response_str.erase(0, response_str.find("v=0"));
+			rtc::Description answer(response_str, "answer");
+			
+			do_log(LOG_INFO, "Setting remote description");
+			peer_connection->setRemoteDescription(answer);
+			
+			return true;
+		} catch (const std::exception &err) {
+			do_log(LOG_ERROR, "Failed to set remote description: %s", err.what());
+			return false;
+		}
+	}
+	
+	return false;
+}
+
+void WHIPOutput::TransferCallbacks(std::shared_ptr<rtc::PeerConnection> newConnection) {
+	newConnection->onStateChange([this](rtc::PeerConnection::State state) {
 		switch (state) {
 		case rtc::PeerConnection::State::New:
 			do_log(LOG_INFO, "PeerConnection state is now: New");
@@ -244,258 +563,127 @@ bool WHIPOutput::Setup()
 		}
 	});
 
-	std::string media_stream_id, cname;
-	media_stream_id.reserve(signaling_media_id_length);
-	cname.reserve(signaling_media_id_length);
-
-	for (int i = 0; i < signaling_media_id_length; ++i) {
-		media_stream_id += signaling_media_id_valid_char[rand() % (sizeof(signaling_media_id_valid_char) - 1)];
-
-		cname += signaling_media_id_valid_char[rand() % (sizeof(signaling_media_id_valid_char) - 1)];
-	}
-
-	ConfigureAudioTrack(media_stream_id, cname);
-	ConfigureVideoTrack(media_stream_id, cname);
-
-	peer_connection->setLocalDescription();
-
-	return true;
-}
-
-// Given a Link header extract URL/Username/Credential and create rtc::IceServer
-// <turn:turn.example.net>; username="user"; credential="myPassword";
-//
-// https://www.ietf.org/archive/id/draft-ietf-wish-whip-13.html#section-4.4
-void WHIPOutput::ParseLinkHeader(std::string val, std::vector<rtc::IceServer> &iceServers)
-{
-	std::string url, username, password;
-
-	auto extractUrl = [](std::string input) -> std::string {
-		auto head = input.find("<") + 1;
-		auto tail = input.find(">");
-
-		if (head == std::string::npos || tail == std::string::npos) {
-			return "";
-		}
-		return input.substr(head, tail - head);
-	};
-
-	auto extractValue = [](std::string input) -> std::string {
-		auto head = input.find("\"") + 1;
-		auto tail = input.find_last_of("\"");
-
-		if (head == std::string::npos || tail == std::string::npos) {
-			return "";
-		}
-		return input.substr(head, tail - head);
-	};
-
-	while (true) {
-		std::string token = val;
-		auto pos = token.find(";");
-		if (pos != std::string::npos) {
-			token = val.substr(0, pos);
-		}
-
-		if ((token.find("<stun:", 0) == 0) || (token.find("<turn:", 0) == 0)) {
-			url = extractUrl(token);
-		} else if (token.find("username=") != std::string::npos) {
-			username = extractValue(token);
-		} else if (token.find("credential=") != std::string::npos) {
-			password = extractValue(token);
-		}
-
-		if (pos == std::string::npos) {
+	newConnection->onGatheringStateChange([this](rtc::PeerConnection::GatheringState state) {
+		switch (state) {
+		case rtc::PeerConnection::GatheringState::New:
+			do_log(LOG_INFO, "ICE gathering state: New");
+			break;
+		case rtc::PeerConnection::GatheringState::InProgress:
+			do_log(LOG_INFO, "ICE gathering state: In Progress");
+			break;
+		case rtc::PeerConnection::GatheringState::Complete:
+			do_log(LOG_INFO, "ICE gathering state: Complete");
 			break;
 		}
-		val.erase(0, pos + 1);
+	});
+
+	newConnection->onLocalCandidate([this](rtc::Candidate candidate) {
+		std::string typeStr;
+		switch(candidate.type()) {
+			case rtc::Candidate::Type::Host: typeStr = "host"; break;
+			case rtc::Candidate::Type::ServerReflexive: typeStr = "srflx"; break;
+			case rtc::Candidate::Type::PeerReflexive: typeStr = "prflx"; break;
+			case rtc::Candidate::Type::Relayed: typeStr = "relay"; break;
+			default: typeStr = "unknown";
+		}
+		
+		do_log(LOG_DEBUG, "New local ICE candidate: type=%s address=%s port=%d", 
+			   typeStr.c_str(),
+			   candidate.address().value_or("unknown").c_str(),
+			   candidate.port());
+	});
+}
+
+void WHIPOutput::TransferAudioTrack(std::shared_ptr<rtc::PeerConnection> newConnection) {
+	if (!audio_track) {
+		do_log(LOG_INFO, "No audio track to transfer");
+		return;
 	}
 
+	do_log(LOG_DEBUG, "Transferring audio track (SSRC: %u)", base_ssrc);
+	
 	try {
-		auto iceServer = rtc::IceServer(url);
-		iceServer.username = username;
-		iceServer.password = password;
-		iceServers.push_back(iceServer);
-	} catch (const std::invalid_argument &err) {
-		do_log(LOG_WARNING, "Failed to construct ICE Server from %s: %s", val.c_str(), err.what());
+		auto description = audio_track->description();
+		audio_track = newConnection->addTrack(description);
+		
+		if (!audio_track) {
+			do_log(LOG_ERROR, "Failed to create new audio track");
+			return;
+		}
+		
+		auto rtp_config = std::make_shared<rtc::RtpPacketizationConfig>(
+			base_ssrc,
+			description.mid(),
+			audio_payload_type,
+			rtc::OpusRtpPacketizer::DefaultClockRate);
+			
+		auto packetizer = std::make_shared<rtc::OpusRtpPacketizer>(rtp_config);
+		audio_sr_reporter = std::make_shared<rtc::RtcpSrReporter>(rtp_config);
+		auto nack_responder = std::make_shared<rtc::RtcpNackResponder>();
+
+		packetizer->addToChain(audio_sr_reporter);
+		packetizer->addToChain(nack_responder);
+		audio_track->setMediaHandler(packetizer);
+		do_log(LOG_INFO, "Audio track transfer complete");
+	} catch (const std::exception &e) {
+		do_log(LOG_ERROR, "Failed to set up audio track: %s", e.what());
 	}
 }
 
-bool WHIPOutput::Connect()
-{
-	struct curl_slist *headers = NULL;
-	headers = curl_slist_append(headers, "Content-Type: application/sdp");
-	if (!bearer_token.empty()) {
-		auto bearer_token_header = std::string("Authorization: Bearer ") + bearer_token;
-		headers = curl_slist_append(headers, bearer_token_header.c_str());
+void WHIPOutput::TransferVideoTrack(std::shared_ptr<rtc::PeerConnection> newConnection) {
+	if (!video_track) {
+		do_log(LOG_INFO, "No video track to transfer");
+		return;
 	}
 
-	std::string read_buffer;
-	std::vector<std::string> http_headers;
-
-	auto offer_sdp = std::string(peer_connection->localDescription().value());
-
-#ifdef DEBUG_SDP
-	do_log(LOG_DEBUG, "Offer SDP:\n%s", offer_sdp.c_str());
-#endif
-
-	// Add user-agent to our requests
-	headers = curl_slist_append(headers, user_agent.c_str());
-
-	char error_buffer[CURL_ERROR_SIZE] = {};
-
-	CURL *c = curl_easy_init();
-	curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_writefunction);
-	curl_easy_setopt(c, CURLOPT_WRITEDATA, (void *)&read_buffer);
-	curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, curl_header_function);
-	curl_easy_setopt(c, CURLOPT_HEADERDATA, (void *)&http_headers);
-	curl_easy_setopt(c, CURLOPT_HTTPHEADER, headers);
-	curl_easy_setopt(c, CURLOPT_URL, endpoint_url.c_str());
-	curl_easy_setopt(c, CURLOPT_POST, 1L);
-	curl_easy_setopt(c, CURLOPT_COPYPOSTFIELDS, offer_sdp.c_str());
-	curl_easy_setopt(c, CURLOPT_TIMEOUT, 8L);
-	curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
-	curl_easy_setopt(c, CURLOPT_UNRESTRICTED_AUTH, 1L);
-	curl_easy_setopt(c, CURLOPT_ERRORBUFFER, error_buffer);
-
-	auto cleanup = [&]() {
-		curl_easy_cleanup(c);
-		curl_slist_free_all(headers);
-	};
-
-	CURLcode res = curl_easy_perform(c);
-	if (res != CURLE_OK) {
-		do_log(LOG_ERROR, "Connect failed: %s", error_buffer[0] ? error_buffer : curl_easy_strerror(res));
-		cleanup();
-		obs_output_signal_stop(output, OBS_OUTPUT_CONNECT_FAILED);
-		return false;
+	do_log(LOG_DEBUG, "Transferring video track (SSRC: %u)", base_ssrc + 1);
+	auto description = video_track->description();
+	video_track = newConnection->addTrack(description);
+	
+	if (!video_track) {
+		do_log(LOG_ERROR, "Failed to create new video track");
+		return;
+	}
+	
+	auto rtp_config = std::make_shared<rtc::RtpPacketizationConfig>(
+		base_ssrc + 1,
+		description.mid(),
+		video_payload_type,
+		rtc::H264RtpPacketizer::defaultClockRate);
+		
+	const obs_encoder_t *encoder = obs_output_get_video_encoder2(output, 0);
+	if (!encoder) {
+		do_log(LOG_ERROR, "No video encoder found");
+		return;
 	}
 
-	long response_code;
-	curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &response_code);
-	if (response_code != 201) {
-		do_log(LOG_ERROR, "Connect failed: HTTP endpoint returned response code %ld", response_code);
-		cleanup();
-		obs_output_signal_stop(output, OBS_OUTPUT_INVALID_STREAM);
-		return false;
-	}
+	const char *codec = obs_encoder_get_codec(encoder);
+	std::shared_ptr<rtc::RtpPacketizer> packetizer;
 
-	if (read_buffer.empty()) {
-		do_log(LOG_ERROR, "Connect failed: No data returned from HTTP endpoint request");
-		cleanup();
-		obs_output_signal_stop(output, OBS_OUTPUT_CONNECT_FAILED);
-		return false;
-	}
-
-	long redirect_count = 0;
-	curl_easy_getinfo(c, CURLINFO_REDIRECT_COUNT, &redirect_count);
-
-	std::string last_location_header;
-	size_t location_header_count = 0;
-	for (auto &http_header : http_headers) {
-		auto value = value_for_header("location", http_header);
-		if (value.empty())
-			continue;
-
-		location_header_count++;
-		last_location_header = value;
-	}
-
-	if (location_header_count < static_cast<size_t>(redirect_count) + 1) {
-		do_log(LOG_ERROR, "WHIP server did not provide a resource URL via the Location header");
-		cleanup();
-		obs_output_signal_stop(output, OBS_OUTPUT_CONNECT_FAILED);
-		return false;
-	}
-
-	CURLU *url_builder = curl_url();
-
-	// Parse Link headers to extract STUN/TURN server configuration URLs
-	std::vector<rtc::IceServer> iceServers;
-	for (auto &http_header : http_headers) {
-		auto value = value_for_header("link", http_header);
-		if (value.empty())
-			continue;
-
-		// Parse multiple links separated by ','
-		for (auto end = value.find(","); end != std::string::npos; end = value.find(",")) {
-			this->ParseLinkHeader(value.substr(0, end), iceServers);
-			value = value.substr(end + 1);
-		}
-		this->ParseLinkHeader(value, iceServers);
-	}
-
-	// If Location header doesn't start with `http` it is a relative URL.
-	// Construct a absolute URL using the host of the effective URL
-	if (last_location_header.find("http") != 0) {
-		char *effective_url = nullptr;
-		curl_easy_getinfo(c, CURLINFO_EFFECTIVE_URL, &effective_url);
-		if (effective_url == nullptr) {
-			do_log(LOG_ERROR, "Failed to build Resource URL");
-			cleanup();
-			obs_output_signal_stop(output, OBS_OUTPUT_CONNECT_FAILED);
-			return false;
-		}
-
-		curl_url_set(url_builder, CURLUPART_URL, effective_url, 0);
-		curl_url_set(url_builder, CURLUPART_PATH, last_location_header.c_str(), 0);
-		curl_url_set(url_builder, CURLUPART_QUERY, "", 0);
-	} else {
-		curl_url_set(url_builder, CURLUPART_URL, last_location_header.c_str(), 0);
-	}
-
-	char *url = nullptr;
-	CURLUcode rc = curl_url_get(url_builder, CURLUPART_URL, &url, CURLU_NO_DEFAULT_PORT);
-	if (rc) {
-		do_log(LOG_ERROR, "WHIP server provided a invalid resource URL via the Location header");
-		cleanup();
-		obs_output_signal_stop(output, OBS_OUTPUT_CONNECT_FAILED);
-		return false;
-	}
-
-	resource_url = url;
-	curl_free(url);
-	do_log(LOG_DEBUG, "WHIP Resource URL is: %s", resource_url.c_str());
-	curl_url_cleanup(url_builder);
-
-#ifdef DEBUG_SDP
-	do_log(LOG_DEBUG, "Answer SDP:\n%s", read_buffer.c_str());
-#endif
-
-	auto response = std::string(read_buffer);
-	response.erase(0, response.find("v=0"));
-
-	rtc::Description answer(response, "answer");
 	try {
-		peer_connection->setRemoteDescription(answer);
-	} catch (const std::invalid_argument &err) {
-		do_log(LOG_ERROR, "WHIP server responded with invalid SDP: %s", err.what());
-		cleanup();
-		struct dstr error_message;
-		dstr_init_copy(&error_message, obs_module_text("Error.InvalidSDP"));
-		dstr_replace(&error_message, "%1", err.what());
-		obs_output_set_last_error(output, error_message.array);
-		dstr_free(&error_message);
-		obs_output_signal_stop(output, OBS_OUTPUT_CONNECT_FAILED);
-		return false;
-	} catch (const std::exception &err) {
-		do_log(LOG_ERROR, "Failed to set remote description: %s", err.what());
-		cleanup();
-		struct dstr error_message;
-		dstr_init_copy(&error_message, obs_module_text("Error.NoRemoteDescription"));
-		dstr_replace(&error_message, "%1", err.what());
-		obs_output_set_last_error(output, error_message.array);
-		dstr_free(&error_message);
-		obs_output_signal_stop(output, OBS_OUTPUT_CONNECT_FAILED);
-		return false;
+		if (strcmp("h264", codec) == 0) {
+			packetizer = std::make_shared<rtc::H264RtpPacketizer>(
+				rtc::H264RtpPacketizer::Separator::StartSequence,
+				rtp_config, MAX_VIDEO_FRAGMENT_SIZE);
+		} else if (strcmp("av1", codec) == 0) {
+			packetizer = std::make_shared<rtc::AV1RtpPacketizer>(
+				rtc::AV1RtpPacketizer::Packetization::TemporalUnit,
+				rtp_config, MAX_VIDEO_FRAGMENT_SIZE);
+		} else {
+			do_log(LOG_ERROR, "Unsupported video codec: %s", codec);
+			return;
+		}
+
+		if (packetizer) {
+			video_sr_reporter = std::make_shared<rtc::RtcpSrReporter>(rtp_config);
+			packetizer->addToChain(video_sr_reporter);
+			packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>(video_nack_buffer_size));
+			video_track->setMediaHandler(packetizer);
+			do_log(LOG_INFO, "Video track transfer complete");
+		}
+	} catch (const std::exception &e) {
+		do_log(LOG_ERROR, "Failed to set up video track: %s", e.what());
 	}
-	cleanup();
-
-#if RTC_VERSION_MAJOR == 0 && RTC_VERSION_MINOR > 20 || RTC_VERSION_MAJOR > 1
-	peer_connection->gatherLocalCandidates(iceServers);
-#endif
-
-	return true;
 }
 
 void WHIPOutput::StartThread()
@@ -521,10 +709,11 @@ void WHIPOutput::StartThread()
 void WHIPOutput::SendDelete()
 {
 	if (resource_url.empty()) {
-		do_log(LOG_DEBUG, "No resource URL available, not sending DELETE");
+		do_log(LOG_INFO, "No resource URL available, not sending DELETE");
 		return;
 	}
 
+	// Set up CURL headers
 	struct curl_slist *headers = NULL;
 	if (!bearer_token.empty()) {
 		auto bearer_token_header = std::string("Authorization: Bearer ") + bearer_token;
@@ -534,49 +723,60 @@ void WHIPOutput::SendDelete()
 	// Add user-agent to our requests
 	headers = curl_slist_append(headers, user_agent.c_str());
 
-	char error_buffer[CURL_ERROR_SIZE] = {};
-
-	CURL *c = curl_easy_init();
-	curl_easy_setopt(c, CURLOPT_HTTPHEADER, headers);
-	curl_easy_setopt(c, CURLOPT_URL, resource_url.c_str());
-	curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, "DELETE");
-	curl_easy_setopt(c, CURLOPT_TIMEOUT, 8L);
-	curl_easy_setopt(c, CURLOPT_ERRORBUFFER, error_buffer);
-
-	auto cleanup = [&]() {
-		curl_easy_cleanup(c);
-		curl_slist_free_all(headers);
+	// Use RAII for headers cleanup
+	auto cleanup_headers = [headers]() {
+		if (headers) {
+			curl_slist_free_all(headers);
+		}
 	};
 
-	CURLcode res = curl_easy_perform(c);
+	char error_buffer[CURL_ERROR_SIZE] = {};
+
+	// Use RAII for CURL cleanup
+	std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
+	if (!curl) {
+		do_log(LOG_ERROR, "Failed to initialize CURL for DELETE request");
+		cleanup_headers();
+		return;
+	}
+
+	curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, headers);
+	curl_easy_setopt(curl.get(), CURLOPT_URL, resource_url.c_str());
+	curl_easy_setopt(curl.get(), CURLOPT_CUSTOMREQUEST, "DELETE");
+	curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, 8L);
+	curl_easy_setopt(curl.get(), CURLOPT_ERRORBUFFER, error_buffer);
+
+	CURLcode res = curl_easy_perform(curl.get());
 	if (res != CURLE_OK) {
 		do_log(LOG_WARNING, "DELETE request for resource URL failed: %s",
-		       error_buffer[0] ? error_buffer : curl_easy_strerror(res));
-		cleanup();
+			   error_buffer[0] ? error_buffer : curl_easy_strerror(res));
+		cleanup_headers();
 		return;
 	}
 
 	long response_code;
-	curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &response_code);
+	curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &response_code);
 	if (response_code != 200) {
 		do_log(LOG_WARNING, "DELETE request for resource URL failed. HTTP Code: %ld", response_code);
-		cleanup();
+		cleanup_headers();
 		return;
 	}
 
-	do_log(LOG_DEBUG, "Successfully performed DELETE request for resource URL");
+	do_log(LOG_INFO, "Successfully performed DELETE request for resource URL");
 	resource_url.clear();
-	cleanup();
+	cleanup_headers();
 }
 
 void WHIPOutput::StopThread(bool signal)
 {
-	if (peer_connection != nullptr) {
+	if (peer_connection) {
+		do_log(LOG_INFO, "Closing peer connection");
 		peer_connection->close();
 		peer_connection = nullptr;
-		audio_track = nullptr;
-		video_track = nullptr;
 	}
+
+	audio_track = nullptr;
+	video_track = nullptr;
 
 	SendDelete();
 
@@ -587,7 +787,7 @@ void WHIPOutput::StopThread(bool signal)
 	 * desync the UI, as the output will be "stopped" and not
 	 * "reconnecting", but the "stop" signal will have never been
 	 * emitted.
-	 */
+	*/
 	if (running && signal) {
 		obs_output_signal_stop(output, OBS_OUTPUT_SUCCESS);
 		running = false;
@@ -600,37 +800,53 @@ void WHIPOutput::StopThread(bool signal)
 	last_video_timestamp = 0;
 }
 
-void WHIPOutput::Send(void *data, uintptr_t size, uint64_t duration, std::shared_ptr<rtc::Track> track,
-		      std::shared_ptr<rtc::RtcpSrReporter> rtcp_sr_reporter)
+void WHIPOutput::Send(void *data, uintptr_t size, uint64_t duration, 
+					 std::shared_ptr<rtc::Track> track,
+					 std::shared_ptr<rtc::RtcpSrReporter> rtcp_sr_reporter)  // Add closing parenthesis here
 {
-	if (track == nullptr || !track->isOpen())
+	if (!track) {
+		static bool logged_null = false;
+		if (!logged_null) {
+			do_log(LOG_INFO, "Track is null");
+			logged_null = true;
+		}
 		return;
+	}
 
-	std::vector<rtc::byte> sample{(rtc::byte *)data, (rtc::byte *)data + size};
+	if (!track->isOpen()) {
+		static bool logged_closed = false;
+		if (!logged_closed) {
+			do_log(LOG_INFO, "Track is not open");
+			logged_closed = true;
+		}
+		return;
+	}
 
-	auto rtp_config = rtcp_sr_reporter->rtpConfig;
-
-	// Sample time is in microseconds, we need to convert it to seconds
-	auto elapsed_seconds = double(duration) / (1000.0 * 1000.0);
-
-	// Get elapsed time in clock rate
-	uint32_t elapsed_timestamp = rtp_config->secondsToTimestamp(elapsed_seconds);
-
-	// Set new timestamp
-	rtp_config->timestamp = rtp_config->timestamp + elapsed_timestamp;
-
-	// Get elapsed time in clock rate from last RTCP sender report
-	auto report_elapsed_timestamp = rtp_config->timestamp - rtcp_sr_reporter->lastReportedTimestamp();
-
-	// Check if last report was at least 1 second ago
-	if (rtp_config->timestampToSeconds(report_elapsed_timestamp) > 1)
-		rtcp_sr_reporter->setNeedsToReport();
+	if (!peer_connection || 
+		peer_connection->state() != rtc::PeerConnection::State::Connected) {
+		static bool logged_not_connected = false;
+		if (!logged_not_connected) {
+			do_log(LOG_INFO, "PeerConnection not ready");
+			logged_not_connected = true;
+		}
+		return;
+	}
 
 	try {
+		std::vector<rtc::byte> sample{(rtc::byte *)data, (rtc::byte *)data + size};
 		track->send(sample);
 		total_bytes_sent += sample.size();
+
+		static uint64_t last_log = 0;
+		uint64_t now = os_gettime_ns();
+		if (now - last_log > 10000000000) { // Every 10 seconds
+			do_log(LOG_DEBUG, "Media stats: sent=%zu bytes, connected=%d", 
+				   total_bytes_sent.load(),
+				   peer_connection->state() == rtc::PeerConnection::State::Connected);
+			last_log = now;
+		}
 	} catch (const std::exception &e) {
-		do_log(LOG_ERROR, "error: %s ", e.what());
+		do_log(LOG_ERROR, "Failed to send media: %s", e.what());
 	}
 }
 
