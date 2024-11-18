@@ -219,29 +219,29 @@ bool WHIPOutput::Setup()
 	peer_connection->onStateChange([this](rtc::PeerConnection::State state) {
 		switch (state) {
 		case rtc::PeerConnection::State::New:
-			do_log(LOG_INFO, "PeerConnection state: New");
+			do_log(LOG_INFO, "PeerConnection state is now: New");
 			break;
 		case rtc::PeerConnection::State::Connecting:
-			do_log(LOG_INFO, "PeerConnection state: Connecting");
+			do_log(LOG_INFO, "PeerConnection state is now: Connecting");
 			start_time_ns = os_gettime_ns();
 			break;
 		case rtc::PeerConnection::State::Connected:
-			do_log(LOG_INFO, "PeerConnection state: Connected");
+			do_log(LOG_INFO, "PeerConnection state is now: Connected");
 			connect_time_ms = (int)((os_gettime_ns() - start_time_ns) / 1000000.0);
 			do_log(LOG_INFO, "Connect time: %dms", connect_time_ms.load());
 			break;
 		case rtc::PeerConnection::State::Disconnected:
-			do_log(LOG_INFO, "PeerConnection state: Disconnected");
+			do_log(LOG_INFO, "PeerConnection state is now: Disconnected");
 			Stop(false);
 			obs_output_signal_stop(output, OBS_OUTPUT_DISCONNECTED);
 			break;
 		case rtc::PeerConnection::State::Failed:
-			do_log(LOG_INFO, "PeerConnection state: Failed");
+			do_log(LOG_INFO, "PeerConnection state is now: Failed");
 			Stop(false);
 			obs_output_signal_stop(output, OBS_OUTPUT_ERROR);
 			break;
 		case rtc::PeerConnection::State::Closed:
-			do_log(LOG_INFO, "PeerConnection state: Closed");
+			do_log(LOG_INFO, "PeerConnection state is now: Closed");
 			break;
 		}
 	});
