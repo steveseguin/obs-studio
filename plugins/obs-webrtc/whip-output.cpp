@@ -386,7 +386,8 @@ void WHIPOutput::ParseLinkHeader(std::string val, std::vector<rtc::IceServer> &i
 	}
 }
 
-bool WHIPOutput::Connect() {
+bool WHIPOutput::Connect()
+{
 	std::vector<rtc::IceServer> iceServers;
 	std::string read_buffer;
 	std::vector<std::string> http_headers;
