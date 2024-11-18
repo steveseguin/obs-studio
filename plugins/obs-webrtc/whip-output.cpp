@@ -10,8 +10,8 @@ static uint16_t MAX_VIDEO_FRAGMENT_SIZE = 1200;
 
 const int signaling_media_id_length = 16;
 const char signaling_media_id_valid_char[] = "0123456789"
-						 "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-						 "abcdefghijklmnopqrstuvwxyz";
+					     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+					     "abcdefghijklmnopqrstuvwxyz";
 
 const std::string user_agent = generate_user_agent();
 
@@ -100,7 +100,7 @@ void WHIPOutput::Data(struct encoder_packet *packet)
 void WHIPOutput::ConfigureAudioTrack(std::string media_stream_id, std::string cname)
 {
 	if (!obs_output_get_audio_encoder(output, 0)) {
-		do_log(LOG_INFO, "Not configuring audio track: Audio encoder not assigned");
+		do_log(LOG_DEBUG, "Not configuring audio track: Audio encoder not assigned");
 		return;
 	}
 
@@ -127,7 +127,7 @@ void WHIPOutput::ConfigureAudioTrack(std::string media_stream_id, std::string cn
 void WHIPOutput::ConfigureVideoTrack(std::string media_stream_id, std::string cname)
 {
 	if (!obs_output_get_video_encoder(output)) {
-		do_log(LOG_INFO, "Not configuring video track: Video encoder not assigned");
+		do_log(LOG_DEBUG, "Not configuring video track: Video encoder not assigned");
 		return;
 	}
 
@@ -709,7 +709,7 @@ void WHIPOutput::StartThread()
 void WHIPOutput::SendDelete()
 {
 	if (resource_url.empty()) {
-		do_log(LOG_INFO, "No resource URL available, not sending DELETE");
+		do_log(LOG_DEBUG, "No resource URL available, not sending DELETE");
 		return;
 	}
 
@@ -762,7 +762,7 @@ void WHIPOutput::SendDelete()
 		return;
 	}
 
-	do_log(LOG_INFO, "Successfully performed DELETE request for resource URL");
+	do_log(LOG_DEBUG, "Successfully performed DELETE request for resource URL");
 	resource_url.clear();
 	cleanup_headers();
 }
@@ -787,7 +787,7 @@ void WHIPOutput::StopThread(bool signal)
 	 * desync the UI, as the output will be "stopped" and not
 	 * "reconnecting", but the "stop" signal will have never been
 	 * emitted.
-	*/
+	 */
 	if (running && signal) {
 		obs_output_signal_stop(output, OBS_OUTPUT_SUCCESS);
 		running = false;
@@ -831,6 +831,13 @@ void WHIPOutput::Send(void *data, uintptr_t size, uint64_t duration,
 		}
 		return;
 	}
+
+	// Get elapsed time in clock rate from last RTCP sender report
+	auto report_elapsed_timestamp = rtp_config->timestamp - rtcp_sr_reporter->lastReportedTimestamp();
+
+	// Check if last report was at least 1 second ago
+	if (rtp_config->timestampToSeconds(report_elapsed_timestamp) > 1)
+		rtcp_sr_reporter->setNeedsToReport();
 
 	try {
 		std::vector<rtc::byte> sample{(rtc::byte *)data, (rtc::byte *)data + size};
