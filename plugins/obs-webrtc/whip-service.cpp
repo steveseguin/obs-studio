@@ -83,10 +83,10 @@ void register_whip_service()
 		WHIPService::ApplyEncoderSettings(video_settings, audio_settings);
 	};
 	info.get_supported_video_codecs = [](void *) -> const char ** {
-		return video_codecs;
+	    return service_video_codecs;
 	};
 	info.get_supported_audio_codecs = [](void *) -> const char ** {
-		return audio_codecs;
+	    return service_audio_codecs;
 	};
 	info.can_try_to_connect = [](void *priv_data) -> bool {
 		return static_cast<WHIPService *>(priv_data)->CanTryToConnect();
