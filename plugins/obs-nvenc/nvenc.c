@@ -209,7 +209,8 @@ static inline NV_ENC_MULTI_PASS get_nv_multipass(const char *multipass)
 
 static bool is_10_bit(const struct nvenc_data *enc)
 {
-	return enc->non_texture ? enc->in_format == VIDEO_FORMAT_P010 : obs_p010_tex_active();
+	return enc->non_texture ? enc->in_format == VIDEO_FORMAT_P010
+				: obs_encoder_video_tex_active(enc->encoder, VIDEO_FORMAT_P010);
 }
 
 static bool init_encoder_base(struct nvenc_data *enc, obs_data_t *settings)
@@ -392,7 +393,8 @@ static bool init_encoder_base(struct nvenc_data *enc, obs_data_t *settings)
 	dstr_catf(&log, "\theight:       %d\n", enc->cy);
 	dstr_catf(&log, "\tb-frames:     %ld\n", enc->props.bf);
 	dstr_catf(&log, "\tb-ref-mode:   %ld\n", enc->props.bframe_ref_mode);
-	dstr_catf(&log, "\tlookahead:    %s (%d frames)\n", lookahead ? "true" : "false", rc_lookahead);
+	dstr_catf(&log, "\tlookahead:    %s (%d frames)\n", lookahead ? "true" : "false",
+		  config->rcParams.lookaheadDepth);
 	dstr_catf(&log, "\taq:           %s\n", enc->props.adaptive_quantization ? "true" : "false");
 
 	if (enc->props.split_encode) {
@@ -486,7 +488,10 @@ static bool init_encoder_h264(struct nvenc_data *enc, obs_data_t *settings)
 		config->profileGUID = NV_ENC_H264_PROFILE_HIGH_GUID;
 	}
 
-	apply_user_args(enc);
+	if (!apply_user_args(enc)) {
+		obs_encoder_set_last_error(enc->encoder, obs_module_text("Opts.Invalid"));
+		return false;
+	}
 
 	if (NV_FAILED(nv.nvEncInitializeEncoder(enc->session, &enc->params))) {
 		return false;
@@ -595,7 +600,10 @@ static bool init_encoder_hevc(struct nvenc_data *enc, obs_data_t *settings)
 	hevc_config->outputBitDepth = profile_is_10bpc ? NV_ENC_BIT_DEPTH_10 : NV_ENC_BIT_DEPTH_8;
 #endif
 
-	apply_user_args(enc);
+	if (!apply_user_args(enc)) {
+		obs_encoder_set_last_error(enc->encoder, obs_module_text("Opts.Invalid"));
+		return false;
+	}
 
 	if (NV_FAILED(nv.nvEncInitializeEncoder(enc->session, &enc->params))) {
 		return false;
@@ -679,7 +687,10 @@ static bool init_encoder_av1(struct nvenc_data *enc, obs_data_t *settings)
 	av1_config->numBwdRefs = 1;
 	av1_config->repeatSeqHdr = 1;
 
-	apply_user_args(enc);
+	if (!apply_user_args(enc)) {
+		obs_encoder_set_last_error(enc->encoder, obs_module_text("Opts.Invalid"));
+		return false;
+	}
 
 	if (NV_FAILED(nv.nvEncInitializeEncoder(enc->session, &enc->params))) {
 		return false;
@@ -738,7 +749,7 @@ static bool init_encoder(struct nvenc_data *enc, enum codec_type codec, obs_data
 	enc->in_format = get_preferred_format(pref_format);
 
 	if (enc->in_format == VIDEO_FORMAT_I444 && !support_444) {
-		NV_FAIL(obs_module_text("NVENC.444Unsupported"));
+		NV_FAIL(obs_module_text("444Unsupported"));
 		return false;
 	}
 
@@ -877,7 +888,8 @@ static void *nvenc_create_base(enum codec_type codec, obs_data_t *settings, obs_
 		}
 	}
 
-	if (texture && !obs_p010_tex_active() && !obs_nv12_tex_active()) {
+	if (texture && !obs_encoder_video_tex_active(encoder, VIDEO_FORMAT_NV12) &&
+	    !obs_encoder_video_tex_active(encoder, VIDEO_FORMAT_P010)) {
 		blog(LOG_INFO, "[obs-nvenc] nv12/p010 not active, falling back to "
 			       "non-texture encoder");
 		goto reroute;
@@ -1187,8 +1199,9 @@ bool nvenc_encode_base(struct nvenc_data *enc, struct nv_bitstream *bs, void *pi
 	if (enc->non_texture) {
 		params.bufferFmt = enc->surface_format;
 	} else {
-		params.bufferFmt = obs_p010_tex_active() ? NV_ENC_BUFFER_FORMAT_YUV420_10BIT
-							 : NV_ENC_BUFFER_FORMAT_NV12;
+		params.bufferFmt = obs_encoder_video_tex_active(enc->encoder, VIDEO_FORMAT_P010)
+					   ? NV_ENC_BUFFER_FORMAT_YUV420_10BIT
+					   : NV_ENC_BUFFER_FORMAT_NV12;
 	}
 
 	/* Add ROI map if enabled */
