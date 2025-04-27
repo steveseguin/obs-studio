@@ -322,6 +322,9 @@ bool WHIPOutput::Setup()
 		case rtc::PeerConnection::IceState::Closed:
 			do_log(LOG_INFO, "ICE state: Closed");
 			break;
+		case rtc::PeerConnection::IceState::Completed: // ADD THIS
+			do_log(LOG_INFO, "ICE state: Completed");
+			break;
 		}
 	});
 
@@ -477,7 +480,8 @@ void WHIPOutput::ParseLinkHeader(std::string val, std::vector<rtc::IceServer> &i
 	}
 }
 
-void WHIPOutput::OnIceCandidate(const std::string &candidate, const std::string &mid) {
+void WHIPOutput::OnIceCandidate(const std::string &candidate, [[maybe_unused]] const std::string &mid) {
+
 	if (!running)
 		return;
 		
@@ -717,7 +721,7 @@ void WHIPOutput::TransferCallbacks(std::shared_ptr<rtc::PeerConnection> newConne
 		do_log(LOG_INFO, "New local ICE candidate: type=%s address=%s port=%d", 
 			   typeStr.c_str(),
 			   candidate.address().value_or("unknown").c_str(),
-			   candidate.port());
+			   candidate.port().value_or(0)); 
 	});
 }
 
