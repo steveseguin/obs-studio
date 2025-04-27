@@ -1,5 +1,3 @@
-# OBS CMake common version helper module
-
 include_guard(GLOBAL)
 
 set(_obs_version ${_obs_default_version})
@@ -15,11 +13,11 @@ if(NOT DEFINED OBS_VERSION_OVERRIDE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git
     RESULT_VARIABLE _obs_version_result
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
-
+  
   if(_git_describe_err)
     message(FATAL_ERROR "Could not fetch OBS version tag from git.\n" ${_git_describe_err})
   endif()
-
+  
   if(_obs_version_result EQUAL 0)
     string(REGEX REPLACE "([0-9]+)\\.([0-9]+)\\.([0-9]+).*" "\\1;\\2;\\3" _obs_version_canonical ${_obs_version})
   endif()
@@ -45,9 +43,21 @@ elseif(_obs_version MATCHES "[0-9]+\\.[0-9]+\\.[0-9]+-beta[0-9]+")
   string(REGEX REPLACE "[0-9]+\\.[0-9]+\\.[0-9]+-beta([0-9]+).*$" "\\1" _obs_beta ${_obs_version})
 endif()
 
-list(GET _obs_version_canonical 0 OBS_VERSION_MAJOR)
-list(GET _obs_version_canonical 1 OBS_VERSION_MINOR)
-list(GET _obs_version_canonical 2 OBS_VERSION_PATCH)
+# Add safety checks for the list operations
+if(NOT _obs_version_canonical)
+  set(_obs_version_canonical "30;0;0")
+endif()
+
+list(LENGTH _obs_version_canonical _version_list_length)
+if(_version_list_length GREATER_EQUAL 3)
+  list(GET _obs_version_canonical 0 OBS_VERSION_MAJOR)
+  list(GET _obs_version_canonical 1 OBS_VERSION_MINOR)
+  list(GET _obs_version_canonical 2 OBS_VERSION_PATCH)
+else()
+  set(OBS_VERSION_MAJOR "30")
+  set(OBS_VERSION_MINOR "0")
+  set(OBS_VERSION_PATCH "0")
+endif()
 
 set(OBS_RELEASE_CANDIDATE ${_obs_release_candidate})
 set(OBS_BETA ${_obs_beta})
