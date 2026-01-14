@@ -53,6 +53,7 @@ private:
 	std::string endpoint_url;
 	std::string bearer_token;
 	std::string resource_url;
+	bool use_preconfigured_ice_servers;
 
 	std::atomic<bool> running;
 

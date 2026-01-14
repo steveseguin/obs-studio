@@ -34,6 +34,7 @@ WHIPOutput::WHIPOutput(obs_data_t *, obs_output_t *output)
 	  endpoint_url(),
 	  bearer_token(),
 	  resource_url(),
+	  use_preconfigured_ice_servers(false),
 	  running(false),
 	  start_stop_mutex(),
 	  start_stop_thread(),
@@ -275,8 +276,21 @@ bool WHIPOutput::Setup()
 {
 	rtc::Configuration cfg;
 
+	use_preconfigured_ice_servers = false;
+	const bool is_vdo_whip = endpoint_url.rfind("https://whip.vdo.ninja", 0) == 0 ||
+				 endpoint_url.rfind("https://whip.rtc.ninja", 0) == 0;
+	if (is_vdo_whip) {
+		// VDO.Ninja (and rtc.ninja alias) is P2P; preload STUN so candidates exist in the initial offer.
+		cfg.iceServers = {
+			rtc::IceServer("stun:stun.l.google.com:19302"),
+			rtc::IceServer("stun:stun.cloudflare.com:3478"),
+		};
+		use_preconfigured_ice_servers = true;
+	}
+
 #if RTC_VERSION_MAJOR == 0 && RTC_VERSION_MINOR > 20 || RTC_VERSION_MAJOR > 0
-	cfg.disableAutoGathering = true;
+	// Keep auto-gathering only when we already know the ICE servers.
+	cfg.disableAutoGathering = !use_preconfigured_ice_servers;
 #endif
 
 	peer_connection = std::make_shared<rtc::PeerConnection>(cfg);
@@ -399,6 +413,25 @@ bool WHIPOutput::Connect()
 
 	std::string read_buffer;
 	std::vector<std::string> http_headers;
+
+#if RTC_VERSION_MAJOR == 0 && RTC_VERSION_MINOR > 20 || RTC_VERSION_MAJOR > 0
+	if (use_preconfigured_ice_servers) {
+		// Bundle candidates in the initial offer when trickle ICE may not be supported.
+		const int min_wait_ms = 2000;
+		const int max_wait_ms = 5000;
+		const int step_ms = 100;
+		int waited_ms = 0;
+		while (waited_ms < min_wait_ms ||
+		       (peer_connection->gatheringState() != rtc::PeerConnection::GatheringState::Complete &&
+			waited_ms < max_wait_ms)) {
+			os_sleep_ms(step_ms);
+			waited_ms += step_ms;
+		}
+		if (peer_connection->gatheringState() != rtc::PeerConnection::GatheringState::Complete) {
+			do_log(LOG_WARNING, "ICE gathering timed out; sending offer with partial candidates");
+		}
+	}
+#endif
 
 	auto offer_sdp = std::string(peer_connection->localDescription().value());
 
@@ -574,7 +607,8 @@ bool WHIPOutput::Connect()
 	doCleanup(false);
 
 #if RTC_VERSION_MAJOR == 0 && RTC_VERSION_MINOR > 20 || RTC_VERSION_MAJOR > 0
-	peer_connection->gatherLocalCandidates(iceServers);
+	if (!use_preconfigured_ice_servers)
+		peer_connection->gatherLocalCandidates(iceServers);
 #endif
 
 	return true;
