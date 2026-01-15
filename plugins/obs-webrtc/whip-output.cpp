@@ -34,6 +34,10 @@ WHIPOutput::WHIPOutput(obs_data_t *, obs_output_t *output)
 	  endpoint_url(),
 	  bearer_token(),
 	  resource_url(),
+	  ice_gathering_mutex(),
+	  ice_gathering_cv(),
+	  ice_gathering_complete(false),
+	  has_ice_servers(false),
 	  running(false),
 	  start_stop_mutex(),
 	  start_stop_thread(),
@@ -267,6 +271,67 @@ bool WHIPOutput::Init()
 }
 
 /**
+ * @brief Fetch ICE servers via OPTIONS request to WHIP endpoint.
+ *
+ * Per WHIP spec, the endpoint may provide STUN/TURN servers via Link headers
+ * in response to an OPTIONS request. This allows ICE gathering to begin
+ * before the offer is sent, enabling P2P connections behind NAT.
+ *
+ * @param iceServers Vector to populate with discovered ICE servers
+ * @return bool True if request succeeded (even if no ICE servers found)
+ */
+bool WHIPOutput::FetchIceServersViaOptions(std::vector<rtc::IceServer> &iceServers)
+{
+	struct curl_slist *headers = nullptr;
+	headers = curl_slist_append(headers, "Accept: application/sdp");
+	headers = curl_slist_append(headers, user_agent.c_str());
+
+	if (!bearer_token.empty()) {
+		auto bearer_token_header = std::string("Authorization: Bearer ") + bearer_token;
+		headers = curl_slist_append(headers, bearer_token_header.c_str());
+	}
+
+	std::vector<std::string> http_headers;
+
+	CURL *c = curl_easy_init();
+	curl_easy_setopt(c, CURLOPT_HTTPHEADER, headers);
+	curl_easy_setopt(c, CURLOPT_URL, endpoint_url.c_str());
+	curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, "OPTIONS");
+	curl_easy_setopt(c, CURLOPT_NOBODY, 1L);
+	curl_easy_setopt(c, CURLOPT_TIMEOUT, 5L);
+	curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, curl_header_function);
+	curl_easy_setopt(c, CURLOPT_HEADERDATA, (void *)&http_headers);
+
+	CURLcode res = curl_easy_perform(c);
+	curl_easy_cleanup(c);
+	curl_slist_free_all(headers);
+
+	if (res != CURLE_OK) {
+		do_log(LOG_DEBUG, "OPTIONS request failed: %s (will proceed without pre-configured ICE servers)",
+		       curl_easy_strerror(res));
+		return false;
+	}
+
+	for (auto &http_header : http_headers) {
+		auto value = value_for_header("link", http_header);
+		if (value.empty())
+			continue;
+
+		for (auto end = value.find(","); end != std::string::npos; end = value.find(",")) {
+			this->ParseLinkHeader(value.substr(0, end), iceServers);
+			value = value.substr(end + 1);
+		}
+		this->ParseLinkHeader(value, iceServers);
+	}
+
+	if (!iceServers.empty()) {
+		do_log(LOG_INFO, "Discovered %zu ICE server(s) via OPTIONS request", iceServers.size());
+	}
+
+	return true;
+}
+
+/**
  * @brief Set up the PeerConnection and media tracks.
  *
  * @return bool
@@ -275,11 +340,30 @@ bool WHIPOutput::Setup()
 {
 	rtc::Configuration cfg;
 
+	// Fetch ICE servers via OPTIONS request (per WHIP spec section 4.4)
+	std::vector<rtc::IceServer> iceServers;
+	FetchIceServersViaOptions(iceServers);
+	has_ice_servers = !iceServers.empty();
+	if (has_ice_servers) {
+		cfg.iceServers = iceServers;
+	}
+
 #if RTC_VERSION_MAJOR == 0 && RTC_VERSION_MINOR > 20 || RTC_VERSION_MAJOR > 0
-	cfg.disableAutoGathering = true;
+	// Enable auto-gathering if we have ICE servers from OPTIONS
+	cfg.disableAutoGathering = iceServers.empty();
 #endif
 
+	ice_gathering_complete = false;
 	peer_connection = std::make_shared<rtc::PeerConnection>(cfg);
+
+	// Set up async ICE gathering completion notification
+	peer_connection->onGatheringStateChange([this](rtc::PeerConnection::GatheringState state) {
+		if (state == rtc::PeerConnection::GatheringState::Complete) {
+			std::lock_guard<std::mutex> lock(ice_gathering_mutex);
+			ice_gathering_complete = true;
+			ice_gathering_cv.notify_one();
+		}
+	});
 
 	peer_connection->onStateChange([this](rtc::PeerConnection::State state) {
 		switch (state) {
@@ -399,6 +483,22 @@ bool WHIPOutput::Connect()
 
 	std::string read_buffer;
 	std::vector<std::string> http_headers;
+
+#if RTC_VERSION_MAJOR == 0 && RTC_VERSION_MINOR > 20 || RTC_VERSION_MAJOR > 0
+	// Wait for ICE gathering to complete (with timeout) so candidates are
+	// bundled in the offer. This is required for P2P WHIP endpoints that
+	// may not support trickle ICE. Only wait if we have ICE servers.
+	if (has_ice_servers) {
+		std::unique_lock<std::mutex> lock(ice_gathering_mutex);
+		if (!ice_gathering_complete) {
+			auto timeout = std::chrono::milliseconds(5000);
+			if (!ice_gathering_cv.wait_for(lock, timeout,
+						       [this] { return ice_gathering_complete.load(); })) {
+				do_log(LOG_WARNING, "ICE gathering timed out; sending offer with partial candidates");
+			}
+		}
+	}
+#endif
 
 	auto offer_sdp = std::string(peer_connection->localDescription().value());
 
@@ -574,6 +674,9 @@ bool WHIPOutput::Connect()
 	doCleanup(false);
 
 #if RTC_VERSION_MAJOR == 0 && RTC_VERSION_MINOR > 20 || RTC_VERSION_MAJOR > 0
+	// Always gather with POST response servers to:
+	// 1. Get host candidates even if no ICE servers provided
+	// 2. Incorporate any TURN servers/credentials from the POST response
 	peer_connection->gatherLocalCandidates(iceServers);
 #endif
 

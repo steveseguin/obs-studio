@@ -11,6 +11,8 @@
 #include <mutex>
 #include <thread>
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 
 #include <rtc/rtc.hpp>
 
@@ -45,6 +47,7 @@ private:
 	void SendDelete();
 	void StopThread(bool signal);
 	void ParseLinkHeader(std::string linkHeader, std::vector<rtc::IceServer> &iceServers);
+	bool FetchIceServersViaOptions(std::vector<rtc::IceServer> &iceServers);
 	void Send(void *data, uintptr_t size, uint64_t duration, std::shared_ptr<rtc::Track> track,
 		  std::shared_ptr<rtc::RtcpSrReporter> rtcp_sr_reporter);
 
@@ -53,6 +56,11 @@ private:
 	std::string endpoint_url;
 	std::string bearer_token;
 	std::string resource_url;
+
+	std::mutex ice_gathering_mutex;
+	std::condition_variable ice_gathering_cv;
+	std::atomic<bool> ice_gathering_complete;
+	bool has_ice_servers;
 
 	std::atomic<bool> running;
 
