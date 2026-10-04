@@ -24,7 +24,8 @@ inline int64_t whip_keyframe_interval(int64_t seconds)
 inline const char *whip_maximum_bitrate_setting(const std::string &encoder_id)
 {
 	if (encoder_id == "ffmpeg_vaapi" || encoder_id == "ffmpeg_vaapi_tex" || encoder_id == "hevc_ffmpeg_vaapi" ||
-	    encoder_id == "hevc_ffmpeg_vaapi_tex" || encoder_id == "av1_ffmpeg_vaapi" || encoder_id == "av1_ffmpeg_vaapi_tex") {
+	    encoder_id == "hevc_ffmpeg_vaapi_tex" || encoder_id == "av1_ffmpeg_vaapi" ||
+	    encoder_id == "av1_ffmpeg_vaapi_tex") {
 		return "maxrate";
 	}
 	return "max_bitrate";

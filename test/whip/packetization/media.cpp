@@ -66,11 +66,12 @@ static void test_settings()
 	}
 	// Use the real encoder keys so a correct helper cannot hide a broken adapter.
 	for (const char *encoder : {"ffmpeg_vaapi", "ffmpeg_vaapi_tex", "hevc_ffmpeg_vaapi", "hevc_ffmpeg_vaapi_tex",
-				   "av1_ffmpeg_vaapi", "av1_ffmpeg_vaapi_tex"}) {
+				    "av1_ffmpeg_vaapi", "av1_ffmpeg_vaapi_tex"}) {
 		std::map<std::string, int64_t> settings{{"bitrate", 1000}, {"maxrate", 30000}, {"max_bitrate", 1}};
 		for (const char *mode : {"VBR", "QVBR"}) {
 			require(whip_pacing_bitrate(mode, settings["bitrate"],
-						  settings[whip_maximum_bitrate_setting(encoder)], false) == 300000000,
+						    settings[whip_maximum_bitrate_setting(encoder)],
+						    false) == 300000000,
 				"VAAPI peak was not read from maxrate");
 		}
 	}
