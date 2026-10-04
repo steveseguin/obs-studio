@@ -4,6 +4,7 @@
 #include "whip-media-utils.h"
 
 #include <array>
+#include <ctime>
 #include <regex>
 #include <sstream>
 #include <obs.hpp>
@@ -1084,10 +1085,18 @@ bool WHIPOutput::BuildTrickleSdpFragment(const std::string &mid, const std::stri
 	return true;
 }
 
-void WHIPOutput::SendTrickleIcePatch(const std::string &sdp_frag)
+bool WHIPOutput::SendTrickleIcePatch(const std::string &sdp_frag)
+{
+	return whip_retry_patch([&] { return SendTrickleIcePatchOnce(sdp_frag); }, [this](auto delay) {
+		std::unique_lock<std::mutex> lock(pending_candidates_mutex);
+		return !pending_candidates_cv.wait_for(lock, delay, [this] { return trickle_stop.load(); });
+	});
+}
+
+whip_patch_result WHIPOutput::SendTrickleIcePatchOnce(const std::string &sdp_frag)
 {
 	if (!trickle_enabled || trickle_stop) {
-		return;
+		return {};
 	}
 
 	struct curl_slist *headers = NULL;
@@ -1133,16 +1142,16 @@ void WHIPOutput::SendTrickleIcePatch(const std::string &sdp_frag)
 		});
 
 	CURLcode res = curl_easy_perform(c);
+	long response_code = 0;
 	if (trickle_stop) {
 		curl_easy_cleanup(c);
 		curl_slist_free_all(headers);
-		return;
+		return {};
 	}
 	if (res != CURLE_OK) {
 		do_log(LOG_WARNING, "Trickle ICE PATCH failed: %s",
 		       error_buffer[0] ? error_buffer.data() : curl_easy_strerror(res));
 	} else {
-		long response_code = 0;
 		curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &response_code);
 		if (response_code < 200 || response_code >= 300) {
 			do_log(LOG_WARNING, "Trickle ICE PATCH returned HTTP %ld", response_code);
@@ -1177,6 +1186,34 @@ void WHIPOutput::SendTrickleIcePatch(const std::string &sdp_frag)
 
 	curl_easy_cleanup(c);
 	curl_slist_free_all(headers);
+
+	whip_patch_result result{whip_classify_patch(res == CURLE_OK, response_code)};
+	if (result.status == whip_patch_status::retry) {
+		for (const auto &header : http_headers) {
+			const auto value = value_for_header("retry-after", header);
+			if (value.empty()) {
+				continue;
+			}
+			long long seconds = 0;
+			if (value.find_first_not_of("0123456789") == std::string::npos) {
+				try {
+					seconds = std::stoll(value);
+				} catch (const std::out_of_range &) {
+					seconds = 31;
+				}
+			} else {
+				const auto retry_at = curl_getdate(value.c_str(), nullptr);
+				const auto now = std::time(nullptr);
+				if (retry_at > now) {
+					seconds = retry_at - now;
+				}
+			}
+			// Bound conversion too: very large Retry-After values must not overflow.
+			result.retry_after = std::chrono::seconds(std::min(seconds, 31LL));
+			break;
+		}
+	}
+	return result;
 }
 
 void WHIPOutput::ApplyIncomingRemoteCandidates(const std::string &sdp_frag)
@@ -1213,6 +1250,12 @@ void WHIPOutput::ApplyIncomingRemoteCandidates(const std::string &sdp_frag)
 
 void WHIPOutput::TrickleThread()
 {
+	auto fail_delivery = [this] {
+		if (!trickle_stop) {
+			trickle_enabled = false;
+			do_log(LOG_WARNING, "Trickle ICE delivery failed; not signaling end-of-candidates");
+		}
+	};
 	while (!trickle_stop && trickle_enabled) {
 		std::vector<rtc::Candidate> candidates;
 		bool complete = false;
@@ -1227,14 +1270,25 @@ void WHIPOutput::TrickleThread()
 			candidates.swap(pending_candidates);
 			complete = ice_gathering_complete;
 		}
-		for (const auto &candidate : candidates) {
+		for (size_t i = 0; i < candidates.size(); i++) {
 			if (trickle_stop || !trickle_enabled) {
 				return;
 			}
-			SendTrickleCandidate(candidate);
+			if (!SendTrickleCandidate(candidates[i])) {
+				// Keep unacknowledged candidates ahead of anything gathered during retries.
+				std::lock_guard<std::mutex> lock(pending_candidates_mutex);
+				if (!trickle_stop) {
+					pending_candidates.insert(pending_candidates.begin(), candidates.begin() + i,
+							  candidates.end());
+				}
+				fail_delivery();
+				return;
+			}
 		}
 		if (complete) {
-			SendEndOfCandidates();
+			if (!SendEndOfCandidates()) {
+				fail_delivery();
+			}
 			return;
 		}
 	}
@@ -1252,28 +1306,28 @@ void WHIPOutput::StopTrickle()
 	}
 }
 
-void WHIPOutput::SendTrickleCandidate(const rtc::Candidate &candidate)
+bool WHIPOutput::SendTrickleCandidate(const rtc::Candidate &candidate)
 {
 	// Guard: credentials not yet extracted from offer SDP
 	if (resource_url.empty() || ice_ufrag.empty() || ice_pwd.empty()) {
-		return;
+		return false;
 	}
 
 	std::string sdp_frag;
 	std::string mid = candidate.mid();
 	if (!BuildTrickleSdpFragment(mid, candidate.candidate(), false, sdp_frag)) {
-		return;
+		return false;
 	}
 
 	do_log(LOG_DEBUG, "Trickle ICE candidate (mid=%s): %s", mid.c_str(), candidate.candidate().c_str());
-	SendTrickleIcePatch(sdp_frag);
+	return SendTrickleIcePatch(sdp_frag);
 }
 
-void WHIPOutput::SendEndOfCandidates()
+bool WHIPOutput::SendEndOfCandidates()
 {
 	// Guard: credentials not yet extracted from offer SDP
 	if (resource_url.empty() || ice_ufrag.empty() || ice_pwd.empty()) {
-		return;
+		return false;
 	}
 
 	std::string sdp_frag;
@@ -1283,11 +1337,11 @@ void WHIPOutput::SendEndOfCandidates()
 		mid = first_mid;
 	}
 	if (!BuildTrickleSdpFragment(mid, "", true, sdp_frag)) {
-		return;
+		return false;
 	}
 
 	do_log(LOG_DEBUG, "Sending end-of-candidates");
-	SendTrickleIcePatch(sdp_frag);
+	return SendTrickleIcePatch(sdp_frag);
 }
 
 void register_whip_output()

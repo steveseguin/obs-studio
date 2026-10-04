@@ -1,6 +1,7 @@
 #pragma once
 
 #include <obs-module.h>
+#include "whip-trickle-utils.h"
 #include <util/curl/curl-helper.h>
 #include <util/platform.h>
 #include <util/base.h>
@@ -58,9 +59,10 @@ private:
 	void UpdateTrickleSdpMetadata(const std::string &offer_sdp);
 	bool BuildTrickleSdpFragment(const std::string &mid, const std::string &candidate_line, bool end_of_candidates,
 				     std::string &sdp_frag);
-	void SendTrickleCandidate(const rtc::Candidate &candidate);
-	void SendEndOfCandidates();
-	void SendTrickleIcePatch(const std::string &sdp_frag);
+	bool SendTrickleCandidate(const rtc::Candidate &candidate);
+	bool SendEndOfCandidates();
+	bool SendTrickleIcePatch(const std::string &sdp_frag);
+	whip_patch_result SendTrickleIcePatchOnce(const std::string &sdp_frag);
 	void ApplyIncomingRemoteCandidates(const std::string &sdp_frag);
 	void TrickleThread();
 	void StopTrickle();
