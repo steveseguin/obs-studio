@@ -244,9 +244,10 @@ void WHIPOutput::ConfigureVideoTrack(std::string media_stream_id, std::string cn
 	double pacing_bitrate = 0.0;
 	for (const auto &[layer_encoder, state] : videoLayerStates) {
 		OBSDataAutoRelease settings = obs_encoder_get_settings(layer_encoder);
+		const char *maximum_bitrate_setting = whip_maximum_bitrate_setting(obs_encoder_get_id(layer_encoder));
 		pacing_bitrate += whip_pacing_bitrate(obs_data_get_string(settings, "rate_control"),
 						      obs_data_get_int(settings, "bitrate"),
-						      obs_data_get_int(settings, "max_bitrate"),
+						      obs_data_get_int(settings, maximum_bitrate_setting),
 						      obs_data_get_bool(settings, "limit_bitrate"));
 	}
 

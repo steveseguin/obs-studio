@@ -20,6 +20,17 @@ inline int64_t whip_keyframe_interval(int64_t seconds)
 	return seconds <= 0 || seconds > 2 ? 2 : seconds;
 }
 
+// VAAPI uses maxrate for its peak; other bundled encoders use max_bitrate.
+inline const char *whip_maximum_bitrate_setting(const std::string &encoder_id)
+{
+	if (encoder_id == "ffmpeg_vaapi" || encoder_id == "ffmpeg_vaapi_tex" || encoder_id == "hevc_ffmpeg_vaapi" ||
+	    encoder_id == "hevc_ffmpeg_vaapi_tex" || encoder_id == "av1_ffmpeg_vaapi" ||
+	    encoder_id == "av1_ffmpeg_vaapi_tex") {
+		return "maxrate";
+	}
+	return "max_bitrate";
+}
+
 // This is a packet-pacing allowance, not a change to the encoder's bitrate.
 inline double whip_pacing_bitrate(std::string mode, int64_t bitrate_kbps, int64_t maximum_kbps, bool limit_bitrate)
 {
