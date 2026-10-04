@@ -1087,10 +1087,12 @@ bool WHIPOutput::BuildTrickleSdpFragment(const std::string &mid, const std::stri
 
 bool WHIPOutput::SendTrickleIcePatch(const std::string &sdp_frag)
 {
-	return whip_retry_patch([&] { return SendTrickleIcePatchOnce(sdp_frag); }, [this](auto delay) {
-		std::unique_lock<std::mutex> lock(pending_candidates_mutex);
-		return !pending_candidates_cv.wait_for(lock, delay, [this] { return trickle_stop.load(); });
-	});
+	return whip_retry_patch([&] { return SendTrickleIcePatchOnce(sdp_frag); },
+				[this](auto delay) {
+					std::unique_lock<std::mutex> lock(pending_candidates_mutex);
+					return !pending_candidates_cv.wait_for(lock, delay,
+									       [this] { return trickle_stop.load(); });
+				});
 }
 
 whip_patch_result WHIPOutput::SendTrickleIcePatchOnce(const std::string &sdp_frag)
@@ -1279,7 +1281,7 @@ void WHIPOutput::TrickleThread()
 				std::lock_guard<std::mutex> lock(pending_candidates_mutex);
 				if (!trickle_stop) {
 					pending_candidates.insert(pending_candidates.begin(), candidates.begin() + i,
-							  candidates.end());
+								  candidates.end());
 				}
 				fail_delivery();
 				return;
