@@ -24,3 +24,7 @@ add_test(NAME whip-packetization COMMAND whip-packetization-test)
 add_executable(whip-media-test media.cpp)
 target_compile_features(whip-media-test PRIVATE cxx_std_17)
 add_test(NAME whip-media COMMAND whip-media-test)
+
+add_executable(whip-link-test links.cpp)
+target_compile_features(whip-link-test PRIVATE cxx_std_17)
+add_test(NAME whip-link COMMAND whip-link-test)
