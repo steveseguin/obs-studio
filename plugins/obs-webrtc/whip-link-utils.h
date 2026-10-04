@@ -106,7 +106,8 @@ inline std::vector<whip_link> whip_parse_link_header(const std::string &value)
 				valid = false;
 				break;
 			}
-			std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return std::tolower(c); });
+			std::transform(name.begin(), name.end(), name.begin(),
+				       [](unsigned char c) { return std::tolower(c); });
 			std::string parameter;
 			if (equals != std::string::npos &&
 			    !whip_decode_link_parameter(whip_trim_link_value(parts[i].substr(equals + 1)), parameter)) {

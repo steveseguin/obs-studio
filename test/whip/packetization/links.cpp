@@ -31,9 +31,9 @@ int main()
 	require(links[0].parameters["username"].empty(), "Empty quoted value changed");
 	links = whip_parse_link_header("<turn:turn.example>; rel=ice-server; rel=other");
 	require(links.size() == 1 && links[0].parameters["rel"] == "ice-server", "Duplicate rel replaced first value");
-	for (const char *invalid : {"<turn:turn.example>; credential=\"unfinished", "<turn:turn.example>; credential=\"a\"tail",
-				   "<turn:turn.example>; credential=bad value",
-				   "<turn:turn.example>; credential=\"a\r\nb\""}) {
+	for (const char *invalid :
+	     {"<turn:turn.example>; credential=\"unfinished", "<turn:turn.example>; credential=\"a\"tail",
+	      "<turn:turn.example>; credential=bad value", "<turn:turn.example>; credential=\"a\r\nb\""}) {
 		require(whip_parse_link_header(invalid).empty(), "Malformed credential was accepted");
 	}
 	for (int c = 32; c < 127; c++) {
@@ -44,8 +44,10 @@ int main()
 		quoted += char(c);
 		quoted += "suffix\"";
 		links = whip_parse_link_header("<turn:turn.example>; credential=" + quoted);
-		require(links.size() == 1 && links[0].parameters["credential"] == "prefix" + std::string(1, char(c)) + "suffix",
+		require(links.size() == 1 &&
+				links[0].parameters["credential"] == "prefix" + std::string(1, char(c)) + "suffix",
 			"Printable quoted character failed to round-trip");
 	}
-	std::cout << "Link parameters: tokens, quoted separators, escapes, casing, duplicates and invalid input passed\n";
+	std::cout
+		<< "Link parameters: tokens, quoted separators, escapes, casing, duplicates and invalid input passed\n";
 }
