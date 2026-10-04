@@ -2,6 +2,7 @@
 #include "whip-utils.h"
 #include "whip-service.h"
 #include "whip-media-utils.h"
+#include "whip-link-utils.h"
 
 #include <array>
 #include <regex>
@@ -356,14 +357,7 @@ bool WHIPOutput::FetchIceServersViaOptions(std::vector<rtc::IceServer> &iceServe
 			continue;
 		}
 
-		value = trim_string(value);
-		for (auto end = value.find(","); end != std::string::npos; end = value.find(",")) {
-			this->ParseLinkHeader(trim_string(value.substr(0, end)), iceServers);
-			value = trim_string(value.substr(end + 1));
-		}
-		if (!value.empty()) {
-			this->ParseLinkHeader(value, iceServers);
-		}
+		ParseLinkHeader(value, iceServers);
 	}
 
 	if (!iceServers.empty()) {
@@ -505,72 +499,24 @@ bool WHIPOutput::Setup()
 // https://www.ietf.org/archive/id/draft-ietf-wish-whip-13.html#section-4.4
 void WHIPOutput::ParseLinkHeader(std::string val, std::vector<rtc::IceServer> &iceServers)
 {
-	std::string url, username, password, rel;
-	const std::regex ice_url_scheme("^<(stun|stuns|turn|turns):", std::regex_constants::icase);
-
-	auto extractUrl = [](std::string input) -> std::string {
-		auto head = input.find("<") + 1;
-		auto tail = input.find(">");
-
-		if (head == std::string::npos || tail == std::string::npos) {
-			return "";
+	const std::regex ice_url_scheme("^(stun|stuns|turn|turns):", std::regex_constants::icase);
+	const std::regex ice_server_rel("(^|\\s)ice-server(\\s|$)", std::regex_constants::icase);
+	for (auto &link : whip_parse_link_header(val)) {
+		if (!std::regex_search(link.url, ice_url_scheme)) {
+			continue;
 		}
-		return input.substr(head, tail - head);
-	};
-
-	auto extractValue = [](std::string input) -> std::string {
-		auto head = input.find("\"") + 1;
-		auto tail = input.find_last_of("\"");
-
-		if (head == std::string::npos || tail == std::string::npos) {
-			return "";
+		const auto &rel = link.parameters["rel"];
+		if (!rel.empty() && !std::regex_search(rel, ice_server_rel)) {
+			continue;
 		}
-		return input.substr(head, tail - head);
-	};
-
-	while (true) {
-		std::string token = val;
-		auto pos = token.find(";");
-		if (pos != std::string::npos) {
-			token = val.substr(0, pos);
+		try {
+			auto ice_server = rtc::IceServer(link.url);
+			ice_server.username = link.parameters["username"];
+			ice_server.password = link.parameters["credential"];
+			iceServers.push_back(ice_server);
+		} catch (const std::invalid_argument &err) {
+			do_log(LOG_WARNING, "Failed to construct ICE Server: %s", err.what());
 		}
-		token = trim_string(token);
-
-		if (std::regex_search(token, ice_url_scheme)) {
-			url = extractUrl(token);
-		} else if (token.find("rel=") != std::string::npos) {
-			rel = extractValue(token);
-		} else if (token.find("username=") != std::string::npos) {
-			username = extractValue(token);
-		} else if (token.find("credential=") != std::string::npos) {
-			password = extractValue(token);
-		}
-
-		if (pos == std::string::npos) {
-			break;
-		}
-		val.erase(0, pos + 1);
-		val = trim_string(val);
-	}
-
-	if (!rel.empty()) {
-		const std::regex ice_server_rel("(^|\\s)ice-server(\\s|$)", std::regex_constants::icase);
-		if (!std::regex_search(rel, ice_server_rel)) {
-			return;
-		}
-	}
-
-	if (url.empty()) {
-		return;
-	}
-
-	try {
-		auto iceServer = rtc::IceServer(url);
-		iceServer.username = username;
-		iceServer.password = password;
-		iceServers.push_back(iceServer);
-	} catch (const std::invalid_argument &err) {
-		do_log(LOG_WARNING, "Failed to construct ICE Server from %s: %s", val.c_str(), err.what());
 	}
 }
 
@@ -731,16 +677,7 @@ bool WHIPOutput::Connect()
 			continue;
 		}
 
-		value = trim_string(value);
-
-		// Parse multiple links separated by ','
-		for (auto end = value.find(","); end != std::string::npos; end = value.find(",")) {
-			this->ParseLinkHeader(trim_string(value.substr(0, end)), iceServers);
-			value = trim_string(value.substr(end + 1));
-		}
-		if (!value.empty()) {
-			this->ParseLinkHeader(value, iceServers);
-		}
+		ParseLinkHeader(value, iceServers);
 	}
 
 	// If Location header doesn't start with `http` it is a relative URL.
