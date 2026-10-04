@@ -3,6 +3,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <utility>
 
@@ -62,6 +63,20 @@ static void test_settings()
 			require(whip_pacing_bitrate(mode, inactive, 2000, false) == 100000000,
 				"Inactive bitrate or peak throttled quality mode");
 		}
+	}
+	// Use the real encoder keys so a correct helper cannot hide a broken adapter.
+	for (const char *encoder : {"ffmpeg_vaapi", "ffmpeg_vaapi_tex", "hevc_ffmpeg_vaapi", "hevc_ffmpeg_vaapi_tex",
+				   "av1_ffmpeg_vaapi", "av1_ffmpeg_vaapi_tex"}) {
+		std::map<std::string, int64_t> settings{{"bitrate", 1000}, {"maxrate", 30000}, {"max_bitrate", 1}};
+		for (const char *mode : {"VBR", "QVBR"}) {
+			require(whip_pacing_bitrate(mode, settings["bitrate"],
+						  settings[whip_maximum_bitrate_setting(encoder)], false) == 300000000,
+				"VAAPI peak was not read from maxrate");
+		}
+	}
+	for (const char *encoder : {"obs_x264", "obs_nvenc_h264_tex", "com.apple.videotoolbox.videoencoder.ave.avc"}) {
+		require(std::string(whip_maximum_bitrate_setting(encoder)) == "max_bitrate",
+			"Non-VAAPI peak setting changed");
 	}
 	for (const char *mode : {"VBR", "AVBR", "LA_VBR", "VBR_LAT", "HQVBR", "QVBR"}) {
 		require(whip_pacing_bitrate(mode, 2500, 12000, false) == 120000000, "VBR peak ignored");
